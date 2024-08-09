@@ -1,0 +1,191 @@
+services:
+
+  # SOURCE
+  # DATABASE - RELACIONAL
+  postgres-lab:
+    container_name: postgres-lab
+    hostname: postgres-lab
+    image: postgres:${POSTGRES_VERSION}
+    #image: "postgres:latest"
+    #image: quay.io/debezium/example-postgres:2.1
+    #image: debezium/postgres:16
+    networks:
+      - lab_network
+    #user: "root"
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DB: postgres
+      PGDATA: "/data/postgres"
+    volumes:
+       - ~/docker_files/volumes/lab/postgresql:/data/postgres
+       - ./utils/scripts/postgres/db.sql:/docker-entrypoint-initdb.d/db.sql
+    ports:
+      - "5432:5432"
+    command:
+       - "postgres"
+       - "-c"
+       - "wal_level=logical"
+       - "-c"
+       - "max_replication_slots=4"
+       - "-c"
+       - "max_wal_senders=4"
+
+  #ORCHESTRATION   
+
+  #### STREAMING 
+  kafka-broker-lab:
+    image: docker.io/bitnami/kafka:${KAFKA_VERSION}
+    container_name: kafka-broker-lab
+    hostname: kafka-broker-lab
+    user: root
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    networks:
+      - lab_network
+    environment:
+      # KRaft settings
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_JMX_PORT=9101
+      - KAFKA_CFG_JMX_HOSTNAME=kafka-broker-lab 
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka-broker-lab:29093
+      - KAFKA_KRAFT_CLUSTER_ID=kafka-broker-lab
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=INTERNAL://kafka-broker-lab:29092,CONTROLLER://kafka-broker-lab:29093,EXTERNAL://0.0.0.0:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka-broker-lab:29092,EXTERNAL://kafka-broker-lab:9092
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
+      #- KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS= 0
+      - KAFKA_CFG_NUM_PARTITIONS= 3
+      #- KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR= 3
+      #- KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR= 3
+    volumes:
+      - '~/docker_files/volumes/lab/kafka:/bitnami/kafka'
+
+  # KAFKA CONNECT
+  kafka-connect-lab:
+    image: ${DOCKER_HUB_ACCOUNT}/kafka-connect-debezium:${DEBEZIUM_CONTAINER_VERSION}
+    container_name: kafka-connect-lab
+    hostname: kafka-connect-lab
+    networks:
+      - lab_network
+    ports:
+      - 8083:8083
+    depends_on:      
+      - kafka-broker-lab      
+    environment:
+    - KAFKA_LOG4J_OPTS=-Dlog4j.configuration=file:/opt/kafka/config/connect-log4j.properties
+    - KAFKA_CONNECT_BOOTSTRAP_SERVERS=kafka-broker-lab:29092
+    - |
+        KAFKA_CONNECT_CONFIGURATION=
+        key.converter=org.apache.kafka.connect.json.JsonConverter
+        value.converter=org.apache.kafka.connect.json.JsonConverter
+        key.converter.schemas.enable=false
+        value.converter.schemas.enable=false
+        group.id=connect
+        offset.storage.topic=connect-offsets
+        offset.storage.replication.factor=1
+        config.storage.topic=connect-configs
+        config.storage.replication.factor=1
+        status.storage.topic=connect-status
+        status.storage.replication.factor=1  
+        CONNECT_REST_ADVERTISED_HOST_NAME: 'kafka-connect-lab'    
+    volumes:
+       - ./utils/configs/connectors:/etc/kafka-connect/connectors   
+       - ./utils/scripts/kafka-connect:/scripts  
+    command: /scripts/entrypoint.sh
+        
+  redpanda-console-lab:
+    container_name: redpanda-console-lab
+    hostname: redpanda-console-lab
+    image: docker.redpanda.com/redpandadata/console:${REDPANDA_VERSION}
+    restart: unless-stopped
+    networks:
+      - lab_network
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["kafka-broker-lab:9092"]
+          # schemaRegistry:
+          #   enabled: true
+          #   urls: ["http://schema-registry-lab:8081"]
+        connect:
+          enabled: true
+          clusters:
+            - name: kafka-connect-lab # Required field, will be used as identifier in the frontend
+              url: http://kafka-connect-lab:8083
+              tls:
+                enabled: false # Trusted certs are still allowed by default
+             
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka-broker-lab:
+        condition: service_started
+      kafka-connect-lab:
+        condition: service_started
+
+  #SINK
+
+  #DATA LAKE
+  minio-lab:
+    image: minio/minio:${MINIO_VERSION}
+    container_name: minio-lab
+    networks:
+          - lab_network
+    entrypoint: sh
+    command:   '-c ''mkdir -p /minio_data/raw && mkdir -p /minio_data/trusted && minio server /minio_data --console-address ":9001"'''
+    ports:
+      - "9050:9000"
+      - "9051:9001"
+    hostname: minio-lab
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ~/docker_files/volumes/lab/minio/data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # DATABASE - NOSQL
+  mongo-lab:
+    image: mongo:${MONGODB_VERSION}
+    container_name: mongodb-lab
+    hostname: mongodb-lab
+    networks:
+      - lab_network
+    ports:
+      - 27017:27017
+    volumes:
+       - ~/docker_files/volumes/lab/mongodb:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: password
+
+  mongo-express-lab:
+    image: mongo-express:latest
+    container_name: mongo-express-lab
+    hostname: mongo-express-lab
+    networks:
+      - lab_network
+    ports:
+      - 8091:8081
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: password
+      ME_CONFIG_MONGODB_URL: mongodb://root:password@mongodb-lab:27017/
+  
+networks:
+  lab_network:
+    name: lab-network
+    driver: bridge
+

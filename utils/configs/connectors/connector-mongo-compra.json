@@ -1,0 +1,13 @@
+{
+    "connector.class": "com.mongodb.kafka.connect.MongoSinkConnector",
+    "tasks.max": "1",
+    "connection.uri": "mongodb://root:password@mongodb-lab:27017/",
+    "database": "postgres",
+    "collection": "compra",
+    "topics.regex": "postgres.dbfiafastapi.compra",
+    "max.num.retries": 1,
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "key.converter.schemas.enable": false,
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": false
+}
